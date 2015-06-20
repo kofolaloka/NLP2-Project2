@@ -179,12 +179,21 @@ def getExtendedValue(featureValue, l, r):
 	return featureValue+'_'+str(d)
 
 def getChunks(array, c):
-	n = len(array)
-	s = round(n/float(c))
-	chunks = zip(*[iter(array)]*int(s))
-	if n%s != 0:
-		chunks.append(array[int(-(n%s)):])
-	return chunks
+    n = len(array)
+    minSize = n // c
+    remainder = n % c
+    if c > n:
+        raise Exception("getChunks called with number of chunks greater than length of array")
+    chunks = []
+    nextElement=0
+    for i in range(c):
+        if i < remainder:
+            size = minSize + 1
+        else:
+            size = minSize
+        chunks.append(array[nextElement:nextElement+size])
+        nextElement = nextElement+size
+    return chunks
 
 def initFeatures():
 	start = time.time()
