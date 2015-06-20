@@ -2,7 +2,6 @@ import numpy as np
 from sklearn.linear_model import Perceptron
 from itertools import izip, chain
 from multiprocessing import Pool
-from operator import itemgetter
 from random import randint
 import time
 import datetime
@@ -44,7 +43,7 @@ def main():
 	# Prepare training data
 	global sentences
 	global tags
-	sentences, tags, sourceOrder = readTaggedData('Data/europarl-v7-h102000-tok-leq10.de-en.tagged.de')
+	sentences, tags, identityPerm = readTaggedData('Data/europarl-v7-h102000-tok-leq10.de-en.tagged.de')
 	alignments = readAlignments('Data/europarl-v7-h102000-10.de-en.gdfa')
 	global targetOrder
 	targetOrder = getTargetOrder(sentences, alignments)
@@ -54,7 +53,7 @@ def main():
 
 	sentences = [sentences[i] for i in idx]
 	tags = [tags[i] for i in idx]
-	sourceOrder = [sourceOrder[i] for i in idx]
+	identityPerm = [identityPerm[i] for i in idx]
 	targetOrder = [targetOrder[i] for i in idx]
 	print test-len(sentences), 'sentences of length 0 removed'
 
@@ -62,23 +61,23 @@ def main():
 	features = initFeatures()
 	print '\t\t', len(features), 'features found'
 	
-	reorderingTraining(sourceOrder, 10)
+	reorderingTraining(identityPerm, 10)
 	#'''
 
 def readTaggedData(sFile):
 	sentences = []
 	tags = []
-	sourceOrder = []
+	identityPerm = []
 	with open(sFile, 'rU') as sens:
 		for line in sens:
 			words = np.array([w.split('_') for w in line.strip().split(' ')])
 			sentences.append(list(words[:,0]))
 			tags.append(list(words[:,1]))
-			sourceOrder.append(range(len(words)))
+			identityPerm.append(range(len(words)))
 
 			#break
 			if len(sentences) == 16: break
-	return sentences, tags, sourceOrder 
+	return sentences, tags, identityPerm 
 
 def readAlignments(aFile):
 	alignments = []
@@ -120,7 +119,6 @@ def genPermutations(sen, n):
 	return permutations
 
 def permute(sen, (i, j, k)):
-	#return sen[:i] + sen[j+1:k+1] + sen[i:j+1] + sen[k+1:]
 	return sen[:i] + sen[j:k] + sen[i:j] + sen[k:]
 
 def getTrainingVectors(sourceOrder):
