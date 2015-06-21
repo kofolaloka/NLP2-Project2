@@ -2,9 +2,11 @@ import numpy as np
 from sklearn.linear_model import Perceptron
 from itertools import izip, chain
 from multiprocessing import Pool
-from random import randint
+from random import randint, sample
 import time
 import datetime
+from collections import Counter, defaultdict
+from scipy.sparse import csr_matrix
 
 templateFts = ['t[l-1]','w[l]','t[l]','t[l+1]','"-".join(t[l+1:r])','t[r-1]','w[r]','t[r]','t[r+1]']
 templates = [[1,2,6,7],
@@ -29,8 +31,6 @@ templates = [[1,2,6,7],
 
 def main():
 
-	#print getChunks([1,2,3,4,5,6,7,8,9],2)
-
 	global cores
 	cores = 8
 	global templates
@@ -39,7 +39,6 @@ def main():
 	perceptron = Perceptron(penalty=None, alpha=0.0001, fit_intercept=True, n_iter=1, shuffle=True, verbose=0, eta0=1.0,
                             n_jobs=1, random_state=0, class_weight=None, warm_start=False)
 
-	#'''
 	# Prepare training data
 	global sentences
 	global tags
@@ -50,19 +49,16 @@ def main():
 
 	test = len(sentences)
 	idx = [i for i in range(len(sentences)) if len(sentences[i])>1]
-
 	sentences = [sentences[i] for i in idx]
 	tags = [tags[i] for i in idx]
 	identityPerm = [identityPerm[i] for i in idx]
 	targetOrder = [targetOrder[i] for i in idx]
-	print test-len(sentences), 'sentences of length 0 removed'
-
+	
 	global features
 	features = initFeatures()
 	print '\t\t', len(features), 'features found'
 	
-	reorderingTraining(identityPerm, 10)
-	#'''
+	reorderingTraining(identityPerm, 1)
 
 def readTaggedData(sFile):
 	sentences = []
@@ -76,7 +72,7 @@ def readTaggedData(sFile):
 			identityPerm.append(range(len(words)))
 
 			#break
-			if len(sentences) == 16: break
+			if len(sentences) == 8: break
 	return sentences, tags, identityPerm 
 
 def readAlignments(aFile):
@@ -85,7 +81,7 @@ def readAlignments(aFile):
 		for line in aligns:
 			align = line.strip().split(' ')
 			alignments.append([map(int, a.split('-')) for a in align])
-			if len(alignments) == 16: break
+			if len(alignments) == 8: break
 			#break
 	return alignments
 
@@ -121,22 +117,38 @@ def genPermutations(sen, n):
 def permute(sen, (i, j, k)):
 	return sen[:i] + sen[j:k] + sen[i:j] + sen[k:]
 
+def permuteNeighbor(sen, neighbor):
+	if not 'perm' in neighbor:
+		return sen
+	newSen = sen
+	if 'children' in neighbor:
+		for child in neighbor['children']:
+			newSen = permuteNeighbor(newSen, child)
+	newSen = permute(newSen, neighbor['perm'])
+	return newSen
+
 def getTrainingVectors(sourceOrder):
+	start = time.time()
+	p = Pool(processes=cores)
+	chunks = zip(getChunks(sentences, cores), getChunks(tags, cores),
+		         getChunks(sourceOrder, cores), getChunks(targetOrder, cores))
+	vectors = p.map(getTrainingVectorsProcess, chunks)	
 	X = []
 	y = []
-	for sen, tag, sOrder, tOrder in izip(sentences, tags, sourceOrder, targetOrder):
+	for Xi, yi in vectors:
+		X += Xi
+		y += yi		
+	return csr_matrix(X), np.array(y)
+
+def getTrainingVectorsProcess((sens, sTags, srcOrder, tarOrder)):
+	X = []
+	y = []
+	for sen, tag, sOrder, tOrder in izip(sens, sTags, srcOrder, tarOrder):
 		w = reorder(sen, sOrder)
 		t = reorder(tag, sOrder)
 		for l in xrange(len(sen)):
 			for r in xrange(1, len(sen)):
-				sample = [0]*len(features)
-				for tem in templates:
-					value = getFeatureValue(tem, w, t, l, r)
-					if value in features:
-						sample[features.index(value)] = 1
-						extended = getExtendedValue(value, l, r)
-						if extended in features:
-							sample[features.index(extended)] = 1
+				sample = getSample(w, t, l, r)
 				X.append(sample)
 				if tOrder.index(sOrder[l]) < tOrder.index(sOrder[r]):
 					y.append(0) # don't invert
@@ -184,7 +196,7 @@ def getChunks(array, c):
         raise Exception("getChunks called with number of chunks greater than length of array")
     chunks = []
     nextElement=0
-    for i in range(c):
+    for i in xrange(c):
         if i < remainder:
             size = minSize + 1
         else:
@@ -215,57 +227,55 @@ def getFeaturesProcess((sens, senTags)):
 
 def localSearch(sourceOrder):
 	start = time.time()
-	#'''
 	p = Pool(processes=cores)
 	chunks = zip(getChunks(sentences, cores), 
 				 getChunks(tags, cores),
 				 getChunks(sourceOrder, cores), 
 				 getChunks(targetOrder, cores))
 	neighbors = p.map(localSearchProcess, chunks)
-	print len(neighbors)
-	#'''
-	#neighbors = localSearchProcess((sentences, sourceOrder, targetOrder))
 	print '\tFound best neighbors in', getDuration(start, time.time())
 	return list(chain(*neighbors))
-	#return neighbors
 
 def localSearchProcess((sens, senTags, srcOrder, tarOrder)):
 	neighbors = []
 	for sen, tag, sOrder, tOrder in izip(sens, senTags, srcOrder, tarOrder):
-		beta = {}
-		delta = {}
-		perms = {}
 		n = len(sen)
-		for i in range(0, n):
-			beta[i,i+1] = 0
-			for k in range(i+1, n+1):
-				delta[i,i,k] = 0
-				delta[i,k,k] = 0
-		for w in range(2, n+1):
-			for i in range(0, n-w+1):
+		beta = {(i,i+1):{'value':0} for i in xrange(0,n)}
+		delta = {}
+		for w in xrange(2, n+1):
+			for i in xrange(0, n-w+1):
 				k = i+w
 				beta[i,k] = -float('inf')
-				for j in range(i+1, k):
+				for j in xrange(i+1, k):
 					delta = addBenefit(sOrder, i, j, k, tOrder, sen, tag, delta)
-					senBeta = beta[i,j] + beta[j,k] + max(0, delta[i,j,k])
+					senBeta = beta[i,j]['value'] + beta[j,k]['value'] + max(0, delta[i,j,k])
 					if senBeta > beta[i,k]:
-						perms[i,k] = [i,j,k]
-						beta[i,k] = senBeta
-		neighbors.append(perms[0,n])
+						children = [beta[i,j], beta[j,k]]
+						beta[i,k] = {'value': senBeta, 'perm':(i,j,k), 'children': children}
+		neighbors.append(beta[0,n])
 	return neighbors
 
 def getPreference(sOrder, l, r, sen, tag):
 	w = reorder(sen, sOrder)
 	t = reorder(tag, sOrder)
+	sample = getSample(w, t, l, r)
+	return perceptron.predict(csr_matrix([sample]))[0]
+
+def getSample(w, t, l, r):
 	sample = [0]*len(features)
 	for tem in templates:
 		value = getFeatureValue(tem, w, t, l, r)
-		if value in features:
+		try:
 			sample[features.index(value)] = 1
+		except ValueError:
+			pass
+		else:
 			extended = getExtendedValue(value, l, r)
-			if extended in features:
+			try:
 				sample[features.index(extended)] = 1
-	return perceptron.predict([sample])[0]
+			except ValueError:
+				pass
+	return sample
 
 def addBenefit(sOrder, i, j, k, tOrder, sen, tag, delta):
 	if (i,j,k) in delta:
@@ -289,26 +299,35 @@ def reorderingTraining(identityPerm, iters=10):
 	global perceptron 
 	sourceOrder = identityPerm
 
+	print 'Beginning training...'
+	tStart = time.time()
 	X, y = getTrainingVectors(sourceOrder)
 	perceptron = perceptron.fit(X, y)
-
-	for i in xrange(iters):
+	print 'Perceptron initialized in', getDuration(tStart, time.time())
+	
+	iStart = time.time()
+	for i in xrange(1, iters+1):
+		print '\tITERATION', i
 		bestNeighbors = localSearch(sourceOrder)
-		newSource = [permute(sourceOrder[i], bestNeighbors[i]) for i in xrange(len(sourceOrder))]
+		newSource = [permuteNeighbor(sourceOrder[i], bestNeighbors[i]) for i in xrange(len(sourceOrder))]
+		vStart = time.time()
 		X, y = getTrainingVectors(newSource)
 		perceptron = perceptron.fit(X, y)
+		print '\tperceptron updated in', getDuration(vStart, time.time())
 		sourceOrder = newSource
-	
-	source = identityPerm
-	for i in xrange(3):	
-		test = localSearch(source)
-		print sentences[0]
-		print test[0]
-		print permute(sentences[0], targetOrder[0])
-		print [sentences[0][i] for i in permute(source[0], test[0])]
-		source = [permute(source[i], test[i]) for i in xrange(len(source))]
-		print source[0]
-		'---------'
+		print '\tDuration:', getDuration(iStart, time.time())
+
+	s = 0
+	test = localSearch(identityPerm)
+	print sentences[s]
+	print test[s]
+	print reorder(sentences[s], targetOrder[s])
+	print [sentences[s][i] for i in permuteNeighbor(identityPerm[s], test[s])]
+	source = [permuteNeighbor(identityPerm[i], test[i]) for i in xrange(len(identityPerm))]
+	print identityPerm[s]
+	print targetOrder[s]
+
+	print 'Duration:', getDuration(tStart, time.time())
 
 def getDuration(start, stop):
     return str(datetime.timedelta(seconds=(stop-start)))
